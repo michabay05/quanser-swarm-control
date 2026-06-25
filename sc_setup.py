@@ -84,9 +84,9 @@ def _setup_boilerplate_helper(locations, verbose=True) -> MultiAgent:
     verbose: flag that determines the amount of info printed
     """
 
-    subprocess.Popen(['quanser_host_peripheral_client.exe', '-q'])
-    time.sleep(2.0)
-    subprocess.Popen(['quanser_host_peripheral_client.exe', '-uri', 'tcpip://localhost:18444'])
+    # subprocess.Popen(['quanser_host_peripheral_client.exe', '-q'])
+    # time.sleep(2.0)
+    # subprocess.Popen(['quanser_host_peripheral_client.exe', '-uri', 'tcpip://localhost:18444'])
 
     multiagent = setup_multiagent(locations, verbose)
 

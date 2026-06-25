@@ -28,8 +28,8 @@ def mesh2d(xmin, xmax, ymin, ymax, nx, ny=None):
     return X, Y
 
 
-def gaussian_kernel(r, epsilon):
-    return 1+ np.exp(-(epsilon * r)**2)
+def gaussian_kernel(r, epsilon, mult=1):
+    return 1 + mult * np.exp(-(epsilon * r)**2)
 
 
 def inverse_quadratic_kernel(r, epsilon):
@@ -40,8 +40,8 @@ def inverse_multiquadratic_kernel(r, epsilon):
     return 1 / np.sqrt(1 + (epsilon * r)**2)
 
 
-def rbf(X, center, epsilon, kernel=gaussian_kernel):
-    return kernel(np.linalg.norm(X - center, axis=1), epsilon=epsilon)
+def rbf(X, center, epsilon, mult=1, kernel=gaussian_kernel):
+    return kernel(np.linalg.norm(X - center, axis=1), epsilon=epsilon, mult=mult)
 
 
 def mesh2coords(*args):
@@ -52,32 +52,31 @@ class DensityPlot:
     kernel = staticmethod(gaussian_kernel)
     threed = True
 
-    def __init__(self, domain: Polygon, agent_pts):
+    def __init__(self, domain: Polygon, agent_pts, epsilon=0.1, mult=1):
         """
-        Params
-        ------
-        domain: shapely polygon
+        Parameters:
+            domain (Polygon): shapely polygon
+            agent_pts (NDArray): np array of size (n_agents, 2)
+        """
 
-        agent_pts: np array of size (n_agents, 2)
-        """
-        
         self.user_pts = []
 
         self.domain = domain
         minx, miny, maxx, maxy = self.domain.bounds
-        self.epsilon = 0.1
+        self.epsilon = epsilon
+        self.mult = mult
 
         self.agent_pts = agent_pts
 
-        self.voronoi_polys = DensityPlot.mabay_compute_voronoi_cells(agent_pts, self.domain)
+        self.voronoi_polys = self.mabay_compute_voronoi_cells(agent_pts, self.domain)
         self.centroids = [
-            DensityPlot.mabay_compute_centroid(poly, self._uniform_density)
+            self.mabay_compute_centroid(poly, self._uniform_density)
             for poly in self.voronoi_polys
         ]
 
         self.xrange = (minx, maxx)
         self.yrange = (miny, maxy)
-        self.resolution = 0.1
+        self.resolution = 0.2
         self.artists = {}
         self.handlers = {}
         self.setup()
@@ -94,20 +93,20 @@ class DensityPlot:
         Computes the centroid of a polygon given a custom density function.
         
         Parameters:
-        - polygon: a shapely polygon.
-        - density_func: A callable that takes two arrays (x, y) and returns a density array.
-        - grid_res: Resolution of the grid for numerical integration (higher = more accurate).
+            polygon (Polygon): a shapely polygon.
+            density_func: A callable that takes two arrays (x, y) and returns a density array.
+            grid_res (float): Resolution of the grid for numerical integration (higher = more accurate).
         
         Returns:
-        - (cx, cy): The coordinates of the weighted centroid.
+            (cx, cy): The coordinates of the weighted centroid.
         """
         
         # 1. Find the bounding box of the polygon
         min_x, min_y, max_x, max_y = polygon.bounds
         
         # 2. Create a dense grid within the bounding box
-        x_grid = np.linspace(min_x, max_x, grid_res)
-        y_grid = np.linspace(min_y, max_y, grid_res)
+        x_grid, dx = np.linspace(min_x, max_x, num=grid_res, retstep=True)
+        y_grid, dy = np.linspace(min_y, max_y, grid_res, retstep=True)
         X, Y = np.meshgrid(x_grid, y_grid)
         
         # Flatten the grid into an array of (x, y) points
@@ -118,8 +117,9 @@ class DensityPlot:
         inside_points = points[mask]
         
         # # Fallback to standard geometric centroid if the polygon is too small for the grid
-        # if len(inside_points) == 0:
-        #     return np.mean(vertices[:, 0]), np.mean(vertices[:, 1])
+        if len(inside_points) == 0:
+            raise ValueError("No points inside")
+            return np.mean(vertices[:, 0]), np.mean(vertices[:, 1])
             
         inside_x = inside_points[:, 0]
         inside_y = inside_points[:, 1]
@@ -177,45 +177,48 @@ class DensityPlot:
 
         output = 0.0
         for point in self.user_pts:
-            output += rbf(np.array([x, y]).T, point, epsilon=self.epsilon, kernel=self.kernel)
+            output += rbf(np.array([x, y]).T, point, epsilon=self.epsilon, mult=self.mult, kernel=self.kernel)
 
         return output
 
     def recalculate_density(self):
         self.Z = np.zeros(self.X.size)
         for point in self.user_pts:
-            self.Z += rbf(mesh2coords(self.X, self.Y), point, epsilon=self.epsilon, kernel=self.kernel)
+            self.Z += rbf(mesh2coords(self.X, self.Y), point, epsilon=self.epsilon, mult=self.mult, kernel=self.kernel)
         self.Z = self.Z.reshape(self.X.shape)
 
-    def recompute_voronoi(self, cells=False, centroids=False):
-        if cells:
-            self.voronoi_polys = DensityPlot.mabay_compute_voronoi_cells(
-                self.agent_pts, self.domain)
+    def recompute_voronoi(self):
+        self.voronoi_polys = self.mabay_compute_voronoi_cells(
+            self.agent_pts, self.domain)
         
-        if centroids:
-            density_func = self._user_density
-            if len(self.user_pts) == 0:
-                density_func = self._uniform_density
+        density_func = self._user_density
+        if len(self.user_pts) == 0:
+            density_func = self._uniform_density
 
-            self.centroids = [
-                DensityPlot.mabay_compute_centroid(poly, density_func)
-                for poly in self.voronoi_polys
-            ]
+        self.centroids = [
+            self.mabay_compute_centroid(poly, density_func)
+            for poly in self.voronoi_polys
+        ]
 
-
-    def firstplot(self, points=None):
+    def firstplot(self, points=None, from_scratch=True):
         if points is not None:
             self.user_pts = points
-        self.set_mesh()
-        self.recalculate_density()
+
+        if from_scratch:
+            # NOTE: Should only happen when the user add/rms points
+            self.set_mesh()
+            self.recalculate_density()
+
         ar = self.artists
         ar['2dimg'] = self.axs[0].imshow(self.Z, extent=(*self.xrange, *self.yrange), origin='lower', zorder=0)
         x, y = np.asarray(self.user_pts).T if self.user_pts else (np.empty((0)), np.empty((0)))
         ar['2dpts'] = self.axs[0].scatter(x, y, s=50, c='r', alpha=0.3, marker='.', zorder=2)
         ar['2dpts'].set_picker(True)
 
-        self.new_contour()
-        self.new_surface()
+        if from_scratch:
+            # NOTE: Should only happen when the user add/rms points
+            self.new_contour()
+            self.new_surface()
 
         ag_x, ag_y = np.asarray(self.agent_pts).T
         ar['agent_pts'] = self.axs[0].scatter(ag_x, ag_y, s=50, c='r', alpha=1, marker='x', zorder=4)
@@ -241,6 +244,8 @@ class DensityPlot:
             self.history.append(('add_point', index, len(self.user_pts)))
         self.user_pts.insert(index, point)
         self.recalculate_density()
+        self.update()
+        self.plt_update_show()
 
     def remove_point(self, index, add_to_history=True, update=True):
         point = self.user_pts.pop(index)
@@ -275,14 +280,14 @@ class DensityPlot:
         self.xrange = xlim or self.xrange
         self.yrange = ylim or self.yrange
         self.set_mesh()
-        self.recalculate_density(update_centroids=True)
+        self.recalculate_density()
         self.artists['2dimg'].set_extent((*self.xrange, *self.yrange))
         self.update()
         for ax in self.axs:
             ax.relim()
             ax.autoscale_view()
 
-    def redraw(self):
+    def redraw_full(self):
         for artist in self.artists.values():
             if isinstance(artist, list):
                 for el in artist:
@@ -292,7 +297,26 @@ class DensityPlot:
 
         self.artists = {}
         self.axs[0].clear()
-        self.firstplot()
+        self.firstplot(from_scratch=True)
+
+    def update_dynamic_artists(self):
+        ag_x, ag_y = self.agent_pts[:, 0], self.agent_pts[:, 1]
+        self.artists['agent_pts'].set_offsets(np.column_stack((ag_x, ag_y)))
+
+        ct_x, ct_y = np.asarray(self.centroids).T
+        self.artists['cntds'].set_offsets(np.column_stack((ct_x, ct_y)))
+
+        for i, poly in enumerate(self.voronoi_polys):
+            x, y = poly.exterior.xy
+            self.artists[f'vp_{i}'][0].set_xy(np.column_stack((x, y)))
+
+    def redraw(self):
+
+        # self.artists = {}
+        # self.axs[0].clear()
+        # self.firstplot(from_scratch=False)
+
+        self.update_dynamic_artists()
 
     def plt_update_show(self):
         if self.fig:
@@ -348,56 +372,6 @@ class DensityPlot:
             self.artists['3dsurf'].remove()
         self.artists['3dsurf'] = self.axs[1].plot_surface(self.X, self.Y, self.Z, cmap=cm.coolwarm, antialiased=True)
 
-
-points = [(-10, 10), (0, 0), (10, -10)]
-limits = ((-15, 15), (-15, 15))
-
-
-def example_density(points=points, subdivide=1000, limits=limits):
-    xmin, xmax, ymin, ymax = limits
-    ys = np.linspace(-xmin, xmax, subdivide)
-    xs = np.linspace(-ymin, ymax, subdivide)
-
-    X, Y = np.meshgrid(xs, ys)
-    Z = np.zeros(X.size)
-    for point in points:
-        Z += rbf(mesh2coords(X, Y), point, epsilon=0.3, kernel=inverse_multiquadratic_kernel)
-
-    Z = Z.reshape(X.shape)
-    return X, Y, Z
-
-
-def test_plot_density():
-    X, Y, Z = example_density()
-
-    ax = plt.figure().add_subplot(projection='3d')
-    ax.plot_surface(X, Y, Z, cmap=cm.coolwarm)
-
-    def on_click(event):
-        if event.button == MouseButton.LEFT:
-            print(event)
-
-    ax.legend()
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-
-    plt.connect('button_press_event', on_click)
-    plt.show()
-
-
-def test_plot_density2():
-    def on_click(event):
-        if event.button == MouseButton.LEFT:
-            print(event.xdata, event.ydata)
-
-    X, Y, Z = example_density()
-
-    plt.imshow(Z, extent=(X.min(), X.max(), Y.min(), Y.max()), origin='lower')
-    plt.contour(X, Y, Z)
-
-    plt.connect('button_press_event', on_click)
-    plt.show()
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ class Manager(DensityPlot):
         agent_pts = rng.uniform(low=margin, high=side_len - margin, size=(n_agents, 2))
 
         domain = shapely.box(0, 0, side_len, side_len)
-        super().__init__(domain, agent_pts)
+        super().__init__(domain, agent_pts, epsilon=1, mult=10)
 
         # Quanser-related attributes
         self.spawner: MultiAgent = setup_boilerplate(agent_pts, verbose=True)
@@ -50,8 +50,8 @@ class Manager(DensityPlot):
 
         # NOTE(mabay): I believe the quanser simulator runs at 60 fps
         self.frame_dt = 1 / 60
-        self.vmax = 0.4
-        self.wmax = 0.6
+        self.vmax = 0.3
+        self.wmax = np.deg2rad(90)
         self.qbp_key = lambda actor_no: f"{self.KEY_PREFIX}_{actor_no}"
         self.targets: dict[str, NDArray[np.float64] | None] = {
             self.qbp_key(actor_no): None for actor_no in self.actor_nums
@@ -104,6 +104,7 @@ class Manager(DensityPlot):
         rot_z  = start_rot
         target = np.array(target_pos)
         d_pos = target - pos_xy
+        dist_to_target = np.linalg.norm(d_pos)
 
         # Step 1: Fix heading
         target_heading = np.arctan2(d_pos[1], d_pos[0])
@@ -111,30 +112,15 @@ class Manager(DensityPlot):
         out_tw = d_angle / qb_w
 
         # Step 2: Travel along heading
-        dist_to_target = float(np.linalg.norm(d_pos))
         out_tv = dist_to_target / qb_v
 
-        return out_tv, out_tw, dist_to_target, d_angle
+        return float(out_tv), out_tw, float(dist_to_target), d_angle
     
     @staticmethod
     def compute_velocity_from_pos(
         start_pos: tuple[float, float], start_rot: float,
         target_pos: tuple[float, float], dt: float
     ) -> tuple[float, float, float, float]:
-        """Computes the linear and angular velocity required to execute a sequence of
-        moves that will allow a qbot to fix its heading (step 1) and go to its target
-        position (step 2)
-
-        Parameters:
-            start_pos (tuple[float, float]): qbot's starting position on the xy-plane
-            start_rot (float): qbot's starting rotation about the z-axis
-            target_pos (tuple[float, float]): qbot's target position on the xy-plane
-            dt (float): time used to compute the required linear and angular velocity
-
-        Returns:
-            tuple[float, float, float, float]: linear vel (v), angular vel (omega),
-                remaining distance to target, and remaining d_angle to target heading
-        """
         pos_xy = np.array(start_pos)
         rot_z  = start_rot
         target = np.array(target_pos)
@@ -143,6 +129,9 @@ class Manager(DensityPlot):
         # Step 1: Fix heading
         target_heading = np.arctan2(d_pos[1], d_pos[0])
         d_angle = target_heading - rot_z
+        if np.abs(d_angle) > np.pi:
+            d_angle += (-2 * np.pi) if d_angle > 0 else (2 * np.pi)
+
         out_w = d_angle / dt
 
         # Step 2: Travel along heading
@@ -150,6 +139,43 @@ class Manager(DensityPlot):
         out_v = dist_to_target / dt
 
         return out_v, out_w, dist_to_target, d_angle
+
+    def update_move_cmd(self, qbp: QLabsQBotPlatform):
+        actor_no: int = qbp.actorNumber # type: ignore
+        key = self.qbp_key(actor_no)
+        driver = self.qbp_get_dr(actor_no)        
+        target = self.targets[key]
+        if target is None:
+            self.qbot_stop(actor_no)
+            return
+
+        start_pos, start_rot = Manager.qbp_fetch_pose_2d(qbp)
+        calc_v, calc_w, dist_to_target, d_angle = Manager.compute_velocity_from_pos(
+            start_pos.tolist(), start_rot, target.tolist(), self.frame_dt)
+
+        vmax_abs, wmax_abs = np.abs(self.vmax), np.abs(self.wmax)
+        new_v = np.clip(a=calc_v, a_min=-vmax_abs, a_max=vmax_abs)
+        new_w = np.clip(a=calc_w, a_min=-wmax_abs, a_max=wmax_abs)
+        
+        dist_eps = 1e-1
+        angle_eps = np.deg2rad(30)
+
+        if np.abs(d_angle) <= angle_eps:
+            new_w = 0.0
+        else:
+            new_v = 0.0
+
+        print(f"start_rot_z = {start_rot:.3f}; rem = {d_angle:.3f}")
+        print(f"v = {new_v:.3f}; w = {new_w:.3f}")
+        print(f"dist_to_target = {dist_to_target:.3f}")
+        print("--------------------")
+
+        # Send linear and angular velocity command
+        driver.read_write_std(
+            timestamp=self._elapsed_time(), arm=1, commands=np.array([new_v, new_w]))
+        
+        if dist_to_target <= dist_eps:
+            self.targets[key] = None
 
     def update_move_cmd_old(self, qbp: QLabsQBotPlatform, vmax: float, wmax: float):
         """Using `self.frame_dt`, this method computes the linear and angular velocity values as
@@ -211,52 +237,8 @@ class Manager(DensityPlot):
         driver.read_write_std(
             timestamp=self._elapsed_time(), arm=1, commands=[new_v, new_w])
 
-    def update_move_cmd(self, qbp: QLabsQBotPlatform):
-        """Using `self.frame_dt`, this method computes the linear and angular velocity values as
-        well as the required movement duration. Then, it sends a command to the relevant qbots
-
-        Parameters:
-            vmax (float): specified in m/s
-            wmax (float): specified in rad/s
-        """
-        actor_no: int = qbp.actorNumber # type: ignore
-        key = self.qbp_key(actor_no)
-        driver = self.qbp_get_dr(actor_no)        
-        target = self.targets[key]
-        if target is None:
-            self.qbot_stop(actor_no)
-            return
-
-        start_pos, start_rot = Manager.qbp_fetch_pose_2d(qbp)
-        calc_v, calc_w, dist_to_target, d_angle = Manager.compute_velocity_from_pos(
-            start_pos.tolist(), start_rot, target.tolist(), self.frame_dt)
-
-        vmax_abs, wmax_abs = np.abs(self.vmax), np.abs(self.wmax)
-        new_v = np.clip(a=calc_v, a_min=-vmax_abs, a_max=vmax_abs)
-        new_w = np.clip(a=calc_w, a_min=-wmax_abs, a_max=wmax_abs)
-        
-        dist_eps = 1e-1
-        angle_eps = np.deg2rad(25)
-
-        if np.abs(d_angle) <= angle_eps:
-            new_w = 0.0
-        else:
-            new_v = 0.0
-
-        print(f"start_rot_z = {start_rot:.3f}; rem = {d_angle:.3f}")
-        print(f"v = {new_v:.3f}; w = {new_w:.3f}")
-        print(f"dist_to_target = {dist_to_target:.3f}")
-        print("--------------------")
-
-        # Send linear and angular velocity command
-        driver.read_write_std(
-            timestamp=self._elapsed_time(), arm=1, commands=np.array([new_v, new_w]))
-        
-        if dist_to_target <= dist_eps:
-            self.targets[key] = None
-
     def update_targets(self):
-        self.recompute_voronoi(cells=True, centroids=True)
+        self.recompute_voronoi()
 
         self.targets = {}
         for i, poly in enumerate(self.voronoi_polys):
@@ -297,51 +279,27 @@ class Manager(DensityPlot):
 
         # NOTE(mabay): This is hacky but these sequence of commands seem necessary
         # to fully stop the qbot from moving in sim.
-        qb_pd.read_write_std(
-            timestamp=self._elapsed_time(), arm=0, commands=[0, 0])
+        qb_pd.read_write_std(timestamp=self._elapsed_time(),
+            arm=0, commands=np.zeros(2))
         time.sleep(delay)
-        qb_pd.read_write_std(
-            timestamp=self._elapsed_time(), arm=1, commands=[0, 0])
+        qb_pd.read_write_std(timestamp=self._elapsed_time(),
+            arm=1, commands=np.zeros(2))
         time.sleep(delay)
-        qb_pd.read_write_std(
-            timestamp=self._elapsed_time(), arm=0, commands=[0, 0])
-
-    def qbot_stop_v2(self, actor_no: int) -> None:
-        qb_pd = self.qbp_get_dr(actor_no)
-        qb_pd.read_write_std(
-            self._elapsed_time(),
-            arm=1, hold=1,
-            commands=np.array([0.0, 0.0])
-        )
-    
-    def _wait_until_target_angle(self, target_heading, angle_eps):
-        while True:
-            _, _, rot, _ = self.qbot.get_world_transform()
-            if np.abs(target_heading - rot[2]) <= angle_eps:
-                print("Done rotating.")
-                break
-                
-            time.sleep(self.ask_dt)
-            
-    def _wait_until_target_pos(self, target_pos, dist_eps):
-        while True:
-            _, loc, _, _ = self.qbot.get_world_transform()
-            xy = loc[:2]
-            if np.abs(np.linalg.norm(target_pos) - np.linalg.norm(xy)) <= dist_eps:
-                print("Done moving.")
-                break
-
-            time.sleep(self.ask_dt)
+        qb_pd.read_write_std(timestamp=self._elapsed_time(),
+            arm=0, commands=np.zeros(2))
 
     def run(self):
         mng.firstplot()
         mng.plt_update_show()
 
+        start: float = 0.0
         while not self.quit:
+            start = self._elapsed_time()
+
             # Update all the necessary positions so that the latest position
             # data is reflected on the matplotlib window
             self.agent_pts = self.qbp_fetch_all_pos_2d()
-            self.recompute_voronoi(cells=True, centroids=False)
+            self.recompute_voronoi()
 
             # NOTE: The target for each qbot is added when a user clicks on a point.
             for qbot in self.qbots:
@@ -351,7 +309,8 @@ class Manager(DensityPlot):
 
             self.redraw()
             self.plt_update_show()
-            time.sleep(self.frame_dt)
+            print("\t\t\t\t\t", self._elapsed_time() - start)
+            # time.sleep(self.frame_dt)
 
 
 if __name__ == "__main__":
@@ -369,6 +328,30 @@ if __name__ == "__main__":
         print(e)
     finally:
         mng.terminate()
-        # NOTE(mabay): not sure if I need this; revist the need for this maybe running this script on the physical qbot platform.
+        # NOTE(mabay): not sure if I need this; revisit the need for this maybe running this script on the physical qbot platform.
         # os.system("quarc_run -q -Q -t tcpip://localhost:17000 *.rt-linux_qbot_platform -d /tmp")
         print("Script has terminated.")
+
+
+    
+def _wait_until_target_angle(qbot, target_heading, angle_eps, ask_dt):
+    while True:
+        _, _, rot, _ = qbot.get_world_transform()
+        if np.abs(target_heading - rot[2]) <= angle_eps:
+            print("Done rotating.")
+            break
+            
+        time.sleep(ask_dt)
+        
+def _wait_until_target_pos(qbot, target_pos, dist_eps, ask_dt):
+    while True:
+        _, loc, _, _ = qbot.get_world_transform()
+        xy = loc[:2]
+        if np.abs(np.linalg.norm(target_pos) - np.linalg.norm(xy)) <= dist_eps:
+            print("Done moving.")
+            break
+
+        time.sleep(ask_dt)
+
+def qbot_stop_old(qb_pd, timestamp, actor_no: int) -> None:
+    qb_pd.read_write_std(timestamp, arm=1, hold=1, commands=np.zeros(2))
