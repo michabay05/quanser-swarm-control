@@ -13,4 +13,4 @@ $ python main_wo_quanser.py
 ```
 
 After running it for a few seconds, it should look this.
-![[./stable_uniform.png]]
+![a few seconds after running main_wo_quanser.py](./stable_uniform.png)
