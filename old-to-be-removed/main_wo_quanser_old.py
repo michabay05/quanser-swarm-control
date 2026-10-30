@@ -1,6 +1,7 @@
 import time
 import os
 
+
 import numpy as np
 from numpy.typing import NDArray
 import shapely
@@ -49,11 +50,11 @@ class Manager(DensityPlot):
         ax, ay = self.agent_pts[:, 0], self.agent_pts[:, 1]
         targets = np.empty_like(self.agent_pts)
 
-        for i, poly in enumerate(self.voronoi_polys):
+        for i, poly in enumerate(self.cov.voronoi_polys):
             mask = shapely.contains_xy(poly, ax, ay)
             idx = np.flatnonzero(mask)
             assert idx.size == 1
-            targets[idx[0]] = np.array(self.centroids[i])
+            targets[idx[0]] = np.array(self.cov.centroids[i])
 
         self.targets = targets
 
@@ -79,6 +80,7 @@ class Manager(DensityPlot):
             self.update_targets()
             self.update_move_cmd_np()
 
+            # NOTE(mabay): This is just a hack to reduce the frame time
             if frame % 3 == 0:
                 self.redraw()
                 self.plt_update_show()

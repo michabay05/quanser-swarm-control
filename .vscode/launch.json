@@ -1,0 +1,12 @@
+{
+    "configurations": [
+        {
+            "name": "main_wo_quanser",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "qsc.main_wo_quanser",
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        }
+    ]
+}
