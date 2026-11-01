@@ -7,6 +7,7 @@ ctrl+z. shift+R clears the plot. This cannot be undone.
 DensityPlot.threed controls whether or not to plot a 3D surface.
 """
 
+from matplotlib.backend_bases import FigureCanvasBase
 from numpy.typing import NDArray
 import numpy as np
 import matplotlib
@@ -31,16 +32,15 @@ def mesh2d(xmin, xmax, ymin, ymax, nx, ny=None):
 class DensityPlot:
     threed = True
 
-    def __init__(self, domain,
-        cov_add_point, cov_rm_point, compute_density, get_user_pts,
-        key_callback, close_callback,
-        epsilon=0.1, mult=1):
+    def __init__(self, domain, cov_add_point, cov_rm_point,
+        get_user_pts, compute_density, key_callback, close_callback):
         """
         Parameters:
             domain (Polygon): shapely polygon
             agent_pts (NDArray): np array of size (n_agents, 2)
             cov_add_point ((index, point) -> None): callback
             cov_rm_point ((index) -> None): callback
+            get_user_pts (() -> list): callback
             compute_density ((NDArray, NDArray) -> NDArray): callback
             key_callback ((event) -> None): callback
             close_callback (() -> None): callback
@@ -55,13 +55,14 @@ class DensityPlot:
         assert compute_density is not None
         self.compute_density = compute_density
         assert get_user_pts is not None
-        self.get_user_pts = get_user_pts
+        self._get_user_pts = get_user_pts
 
         assert key_callback is not None
         self.key_callback = key_callback
         assert close_callback is not None
         self.close_callback = close_callback
 
+        self.history = []
         self.xrange = (minx, maxx)
         self.yrange = (miny, maxy)
         self.resolution = 0.2
@@ -69,7 +70,10 @@ class DensityPlot:
         self.handlers = {}
         self.setup()
         self.attach_handlers()
-        self.history = []
+
+    @property
+    def user_pts(self):
+        return self._get_user_pts()
 
     def setup(self):
         size = (10, 5) if self.threed else (5.5, 5)
@@ -78,7 +82,6 @@ class DensityPlot:
         ax3d = self.fig.add_subplot(1, 2, 2,
             projection='3d') if self.threed else None
 
-        # axw = ax.twinx()
         assert isinstance(ax, plt.Axes)
         assert isinstance(ax3d, plt3d.axes3d.Axes3D)
         self.axs: tuple[plt.Axes, plt3d.axes3d.Axes3D] = (ax, ax3d)
@@ -113,7 +116,8 @@ class DensityPlot:
         ar['2dimg'] = self.axs[0].imshow(
             self.Z, extent=(*self.xrange, *self.yrange), origin='lower', zorder=0)
         x, y = np.asarray(points).T if points else (np.empty((0)), np.empty((0)))
-        ar['2dpts'] = self.axs[0].scatter(x, y, s=50, c='r', alpha=0.3, marker='.', zorder=2)
+        ar['2dpts'] = self.axs[0].scatter(
+            x, y, s=50, c='r', alpha=0.3, marker='.', zorder=2)
         ar['2dpts'].set_picker(True)
 
         if from_scratch:
@@ -141,7 +145,7 @@ class DensityPlot:
         self.artists['2dcont'] = self.axs[0].contour(self.X, self.Y, self.Z, zorder=1)
 
     def add_point(self, point, index=-1, add_to_history=True):
-        user_pts = self.get_user_pts()
+        user_pts = self.user_pts
 
         if index < 0:
             index = len(user_pts) - index + 1
@@ -153,7 +157,6 @@ class DensityPlot:
         self.update()
 
     def remove_point(self, index, add_to_history=True, update=True):
-        user_pts = self.get_user_pts()
         point = self.cov_rm_point(index)
         if add_to_history:
             self.history.append(('del_point', point, index))
@@ -162,7 +165,6 @@ class DensityPlot:
             self.update()
 
     def undo(self):
-        user_pts = self.get_user_pts()
         if not self.history:
             print('nothing to undo')
             return
@@ -175,7 +177,7 @@ class DensityPlot:
         print('undo', action, point, index)
 
     def update(self):
-        user_pts = self.get_user_pts()
+        user_pts = self.user_pts
         self.artists['2dimg'].set_data(self.Z)
         self.artists['2dimg'].autoscale()  # update the image's cached norm.vmin/vmax
         self.artists['2dpts'].set_offsets(np.asarray(user_pts).reshape((-1, 2)))
@@ -185,7 +187,6 @@ class DensityPlot:
         self.cache_background()
 
     def relim(self, xlim=None, ylim=None):
-        user_pts = self.get_user_pts()
         self.xrange = xlim or self.xrange
         self.yrange = ylim or self.yrange
         self.set_mesh()
@@ -222,7 +223,7 @@ class DensityPlot:
     def cache_background(self):
         self.fig.canvas.draw()
         self._bg = self.fig.canvas.copy_from_bbox(self.fig.bbox)
-    
+
     def blit(self, vpolys):
         c = self.fig.canvas
         c.restore_region(self._bg)
@@ -231,7 +232,7 @@ class DensityPlot:
             self.axs[0].draw_artist(a)
         c.blit(self.fig.bbox)
         c.flush_events()
-    
+
     def redraw(self, positions, vpolys, centroids):
         self.update_dynamic_artists(positions, vpolys, centroids)
         self.blit(vpolys)
@@ -255,7 +256,7 @@ class DensityPlot:
     def on_pick(self, event):
         if event.mouseevent.button == MouseButton.RIGHT and event.artist is self.artists['2dpts']:
             print('delete point', event)
-            self.remove_point(self.get_user_pts(), event.ind[0])
+            self.remove_point(event.ind[0])
 
     def on_click(self, event):
         if event.button == MouseButton.LEFT and event.inaxes is self.axs[0]:

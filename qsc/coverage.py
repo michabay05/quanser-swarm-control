@@ -1,3 +1,4 @@
+from shapely.geometry.base import BaseGeometry
 from numpy.typing import NDArray
 import numpy as np
 import shapely
@@ -25,10 +26,11 @@ def mesh2coords(*args):
 class CoverageAlg:
     kernel = staticmethod(gaussian_kernel)
 
-    def __init__(self, domain: Polygon, agent_pts, epsilon: float, mult: float):
-        self.user_pts = []
+    def __init__(self,
+        domain: Polygon, get_user_pts, agent_pts, epsilon: float, mult: float):
         self.domain = domain
         self.positions = agent_pts
+        self._get_user_pts = get_user_pts
 
         # TODO(mabay): Find optimal values for the kernel's parameter
         self.epsilon = epsilon
@@ -39,6 +41,10 @@ class CoverageAlg:
             self._compute_centroid(poly, self._uniform_density)
             for poly in self.vpolys
         ]
+
+    @property
+    def user_pts(self):
+        return self._get_user_pts()
 
     def update(self):
         """ Recompute the voronoi cells based on the user density """
@@ -69,10 +75,7 @@ class CoverageAlg:
     def remove_point(self, index: int):
         return self.user_pts.pop(index)
 
-    def clear_user_pts(self):
-        self.user_pts.clear()
-
-    def _compute_centroid(self, polygon: Polygon, density_func, grid_res=64):
+    def _compute_centroid(self, polygon: BaseGeometry, density_func, grid_res=64):
         """
         Computes the centroid of a polygon given a custom density function.
 
@@ -110,7 +113,7 @@ class CoverageAlg:
         # Fallback to standard geometric centroid if the polygon is too small for the grid
         if len(inside_points) == 0:
             raise ValueError("No points inside")
-            return np.mean(vertices[:, 0]), np.mean(vertices[:, 1])
+            # return np.mean(vertices[:, 0]), np.mean(vertices[:, 1])
 
         inside_x, inside_y = inside_points[:, 0], inside_points[:, 1]
 
@@ -125,10 +128,10 @@ class CoverageAlg:
 
         cx = np.sum(inside_x * densities) / total_mass
         cy = np.sum(inside_y * densities) / total_mass
-
         return cx, cy
 
-    def _compute_voronoi_cells(self, points: NDArray[np.float64], domain: Polygon) -> list[Polygon]:
+    def _compute_voronoi_cells(self,
+        points: NDArray[np.float64], domain: Polygon) -> list[BaseGeometry]:
         """
         points: np array of shape (n, 2)
         domain: shapely polygon

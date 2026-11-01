@@ -15,7 +15,7 @@ $ uv run -m qsc.main_wo_quanser
 >The above setup works on Mac/Linux. The only difference for windows would be virtual env activation step. For Windows, use `.\Scripts\bin\activate.bat`
 
 After running it for a few seconds, it should look this.
-![a few seconds after running main_wo_quanser.py](./stable_uniform.png)
+![a few seconds after running qsc/main_wo_quanser.py](./stable_uniform.png)
 
 ## Overview
 There are three major components in this repo:

@@ -5,22 +5,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 import shapely
 
-from .coverage import CoverageAlg, mesh2coords, rbf
+from .coverage import CoverageAlg
 from .new_rbf import DensityPlot
 
 class SimpleLocationMng:
     def fetch_pose(self) -> NDArray[np.float64]:
         raise NotImplementedError("fetch_pose")
 
-    def send_waypoint(self, positions: NDArray[np.float64], targets: NDArray[np.float64]):
+    def send_waypoint(self,
+        positions: NDArray[np.float64], targets: NDArray[np.float64],
+        dist_eps=1e-3, vmax=3, frame_dt=1/60):
         d_pos = targets - positions
         dist = np.linalg.norm(d_pos, axis=1)
         if not np.any(dist > dist_eps):
             return
 
         target_heading = np.arctan2(d_pos[:, 1], d_pos[:, 0])
-        out_v = dist / self.frame_dt
-        new_v = np.clip(out_v, -np.abs(self.vmax), np.abs(self.vmax))
+        out_v = dist / frame_dt
+        new_v = np.clip(out_v, -np.abs(vmax), np.abs(vmax))
         new_v = np.where(dist > dist_eps, new_v, 0.0)
 
         # V = [[v0]           [[cos(heading), sin(heading)],
@@ -29,23 +31,26 @@ class SimpleLocationMng:
         V = new_v[:, None] * np.column_stack((np.cos(target_heading), np.sin(target_heading)))
         # TODO(mabay): remove this
         # This method should only set the relevant linear and angular velocity values
-        positions += V * self.frame_dt
+        positions += V * frame_dt
 
 
 class Manager:
-    def __init__(self, positions: NDArray[np.float64], location_mng: LocationMng, side_len=5):
+    def __init__(self,
+        positions: NDArray[np.float64], location_mng: SimpleLocationMng, side_len=5):
+        domain = shapely.box(0, 0, side_len, side_len)
         assert positions.shape[1] == 2, "Incorrect shape: Expected (N, 2) ~ 2D positions"
         self.positions = positions
-        domain = shapely.box(0, 0, side_len, side_len)
+        self.user_pts = []
 
-        self.cov = CoverageAlg(domain, self.positions, epsilon=0.5, mult=10)
+        self.cov = CoverageAlg(
+            domain, self.get_user_pts, self.positions, epsilon=0.5, mult=10)
+        self.viz = DensityPlot(
+            domain, self.cov.add_point, self.cov.remove_point,
+            self.get_user_pts, self.cov.compute_density,
+            self.key_callback, self.close_callback)
 
         assert location_mng is not None
         self.loc_mng = location_mng
-
-        self.viz = DensityPlot(domain,
-            self.cov.add_point, self.cov.remove_point, self.cov.compute_density,
-            self.get_user_pts, self.key_callback, self.close_callback)
 
         self.vmax = 3.
         # TODO(mabay): Not sure if how to deal with frame time
@@ -54,43 +59,28 @@ class Manager:
         self.quit = False
 
     def get_user_pts(self):
-        return self.cov.user_pts
+        return self.user_pts
+
+    def clear_user_pts(self):
+        self.user_pts.clear()
 
     def key_callback(self, event):
         if event.key == 'ctrl+r':
-            self.viz.redraw(self.positions, self.cov.vpolys, self.cov.centroids)
-            self.viz.plt_update_show()
+            self.viz.redraw_full(self.positions, self.cov.vpolys, self.cov.centroids)
+            # self.viz.plt_update_show()
             print('redraw')
         elif event.key == 'ctrl+z':
             self.viz.undo()
             print('undo')
         elif event.key == 'R':
-            self.cov.clear_user_pts()
+            self.clear_user_pts()
             self.viz.history = []
-            self.viz.redraw(self.positions, self.cov.vpolys, self.cov.centroids)
-            self.viz.plt_update_show()
+            self.viz.redraw_full(self.positions, self.cov.vpolys, self.cov.centroids)
+            # self.viz.plt_update_show()
             print('reset (this cannot be undone)')
 
     def close_callback(self):
         self.quit = True
-
-    def update_move_cmd_np(self, dist_eps=1e-4):
-        targets = self.targets
-        d_pos = targets - self.positions
-        dist = np.linalg.norm(d_pos, axis=1)
-        if not np.any(dist > dist_eps):
-            return
-
-        target_heading = np.arctan2(d_pos[:, 1], d_pos[:, 0])
-        out_v = dist / self.frame_dt
-        new_v = np.clip(out_v, -np.abs(self.vmax), np.abs(self.vmax))
-        new_v = np.where(dist > dist_eps, new_v, 0.0)
-
-        # V = [[v0]           [[cos(heading), sin(heading)],
-        #      [v1]        *   [cos(heading), sin(heading)],
-        #      [v2], ...]      [cos(heading), sin(heading)], ...]
-        V = new_v[:, None] * np.column_stack((np.cos(target_heading), np.sin(target_heading)))
-        self.positions += V * self.frame_dt
 
     def update_targets(self):
         # TODO(mabay): Currently, this is a no-op; make it do something
@@ -98,7 +88,7 @@ class Manager:
         ax, ay = self.positions[:, 0], self.positions[:, 1]
         targets = np.empty_like(self.positions)
 
-        # TODO: Think about using 'ordered=True' during voronoi computation to remove the need
+        # TODO(mabay): Think about using 'ordered=True' during voronoi computation to remove the need
         # for this checking loop
         for i, poly in enumerate(self.cov.vpolys):
             mask = shapely.contains_xy(poly, ax, ay)
@@ -116,8 +106,7 @@ class Manager:
             start = time.perf_counter()
             self.cov.update()
             self.update_targets()
-            # TODO(mabay): replace this with loc mng's send_waypoints
-            self.update_move_cmd_np()
+            self.loc_mng.send_waypoint(self.positions, self.targets)
 
             self.viz.redraw(self.positions, self.cov.vpolys, self.cov.centroids)
             # self.viz.plt_update_show()
